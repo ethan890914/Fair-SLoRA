@@ -22,7 +22,8 @@ from exp_suite import BenchmarkConfig, get_all_suites, to_dict, BASE_MODEL, LORA
 from trace import generate_requests, get_real_requests
 sys.path.append("../bench_lora")
 # import error, turn off for a while
-# from slora.utils.metric import reward, attainment_func
+# This is fixed by adding 'PYTHONPATH=.' to your env or in front of python command
+from slora.utils.metric import reward, attainment_func
 
 GB = 1024 ** 3
 
