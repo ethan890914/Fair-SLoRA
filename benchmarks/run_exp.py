@@ -89,13 +89,18 @@ async def send_request(
     timeout = aiohttp.ClientTimeout(total=3 * 3600)
     async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         while True:
+            # print(f"[send_request] req_id={req_id} posting...")
             async with session.post(url, headers=headers, json=data) as response:
+                # print(f"[send_request] req_id={req_id} got response status {response.status}")
                 chunks = []
                 async for chunk, _ in response.content.iter_chunks():
                     if first_token_latency is None:
                         first_token_latency = time.time() - request_start_time
+                        # print(f"[send_request] req_id={req_id} first token at {first_token_latency:.2f}s")
                     chunks.append(chunk)
+                # print(f"[send_request] req_id={req_id} finished iter_chunks, {len(chunks)} chunks")
             output = b"".join(chunks).decode("utf-8")
+            # print(f"[send_request] req_id={req_id} output size={len(output)}")
             # output = json.loads(output)
             # print(output)
             
@@ -129,11 +134,18 @@ async def benchmark(
         if debug:
             print(f"{req.req_id} {req.req_time:.5f} wait {start + req.req_time - time.time():.5f} "
                   f"{req.adapter_dir}")
-        task = asyncio.create_task(send_request(backend, server,
+        task = asyncio.create_task(
+            asyncio.wait_for(
+                send_request(backend, server,
                                                 req.req_id, req.model_dir, req.adapter_dir, req.prompt,
-                                                req.prompt_len, req.output_len, debug))
+                                                req.prompt_len, req.output_len, debug),
+            timeout=60.0 # Add timeout for 1 minute for testing
+            )
+        )
         tasks.append(task)
-    latency = await asyncio.gather(*tasks)
+    print("###### Finished all input request, now await gather")
+    latency = await asyncio.gather(*tasks, return_exceptions=True) # Added return exceptions
+    print("###### Finished await Gather!!!")
     return latency
 
 
