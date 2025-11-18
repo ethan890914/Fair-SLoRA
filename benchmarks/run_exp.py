@@ -21,7 +21,8 @@ import aiohttp
 from exp_suite import BenchmarkConfig, get_all_suites, to_dict, BASE_MODEL, LORA_DIR
 from trace import generate_requests, get_real_requests
 sys.path.append("../bench_lora")
-from slora.utils.metric import reward, attainment_func
+# import error, turn off for a while
+# from slora.utils.metric import reward, attainment_func
 
 GB = 1024 ** 3
 
