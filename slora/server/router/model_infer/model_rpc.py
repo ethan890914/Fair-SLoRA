@@ -331,13 +331,13 @@ class ModelRpcServer(rpyc.Service):
             adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in batch.adapter_dirs]
             
             # Prepare input to LoRA batch inference object creation
-            if self.fair_strategy:
-                popular_adapter_id = None
-                none_adapter_id = self.adapter_id[None]
+            # if self.fair_strategy:
+            popular_adapter_id = None
+            none_adapter_id = self.adapter_id[None]
 
-                if self.popular_adapter_dir is not None:
-                    if self.popular_adapter_dir in self.adapter_id:
-                        popular_adapter_id = self.adapter_id[self.popular_adapter_dir]
+            if self.popular_adapter_dir is not None:
+                if self.popular_adapter_dir in self.adapter_id:
+                    popular_adapter_id = self.adapter_id[self.popular_adapter_dir]
 
             if self.input_params.no_lora_compute:
                 engine = LoraUnorderedBatchInfer(self.model, adapters)

@@ -141,10 +141,11 @@ async def benchmark(
                 send_request(backend, server,
                                                 req.req_id, req.model_dir, req.adapter_dir, req.prompt,
                                                 req.prompt_len, req.output_len, debug),
-            timeout=60.0 # Add timeout for 1 minute for testing
+            timeout=150.0 # Add timeout for 1 minute for testing
             )
         )
         tasks.append(task)
+        # break
     print("###### Finished all input request, now await gather")
     latency = await asyncio.gather(*tasks, return_exceptions=True) # Added return exceptions
     print("###### Finished await Gather!!!")
