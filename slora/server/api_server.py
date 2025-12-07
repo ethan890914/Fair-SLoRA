@@ -377,9 +377,12 @@ def main():
     parser.add_argument("--no-mem-pool", action="store_true")
     parser.add_argument("--bmm", action="store_true")
     parser.add_argument("--no-lora", action="store_true")
+    parser.add_argument("--fair_strategy", action="store_true")
     ''' end of slora arguments '''
 
     args = parser.parse_args()
+    print("api server args: ", args)
+
 
     assert args.max_req_input_len < args.max_req_total_len
     setting["max_req_total_len"] = args.max_req_total_len

@@ -15,13 +15,19 @@ from slora._kernels import dispatch_bgmv
 
 class LoraUnorderedBatchInfer:
 
-    def __init__(self, base_model, adapters, infer_adapter=None):
+    def __init__(self, base_model, adapters, infer_adapter=None, fair_strategy=False, popular_adapter_id=None, none_adapter_id=None):
         self.base_model = base_model
 
         lora_layer_dim = [adapter.r if adapter is not None else 0 for adapter in adapters]
         self.max_lora_dim = max(lora_layer_dim)
 
         self.req_bins = torch.zeros(len(adapters), dtype=torch.long, device="cuda")
+
+
+        # SLoRA does not support None adapter yet for batched inference, so we cannot use this part of the none adapter logic
+        self.popular_adapter_id = popular_adapter_id
+        self.none_adapter_id = none_adapter_id
+        self.fair_strategy = fair_strategy and (popular_adapter_id is not None)
 
         if infer_adapter is not None:
             self.infer_adapter = infer_adapter
@@ -249,19 +255,98 @@ class LoraUnorderedBatchInfer:
         input_embs.add_(o.view(-1, layer_infer.embed_dim_))
         return
     
+    def _get_adapter_bins_for_sub_popular(self):
+        """
+        For subtraction pass:
+        - non-pop rows: use popular_adapter_id
+        - pop rows: use none_adapter_id to get zero delta
+        """
+        if not self.fair_strategy:
+            return None
+        bins = self.req_bins.clone()
+        if self.popular_adapter_id is None or self.none_adapter_id is None:
+            return None
+        pop = self.popular_adapter_id
+        none = self.none_adapter_id
+        pop_mask = (bins == pop)
+        bins[pop_mask] = none
+        bins[~pop_mask] = pop
+        return bins
+
+    def _get_adapter_bins_for_add_current(self):
+        """
+        For addition pass:
+        - non-pop rows: use their true adapter ids (self.req_bins)
+        - pop rows: use none_adapter_id so they skip LoRA
+        """
+        if not self.fair_strategy:
+            return None
+        bins = self.req_bins.clone()
+        if self.popular_adapter_id is None or self.none_adapter_id is None:
+            return None
+        pop = self.popular_adapter_id
+        none = self.none_adapter_id
+        pop_mask = (bins == pop)
+        bins[pop_mask] = none
+        return bins
+
 
     # @calculate_time(show=True, min_cost_ms=0)
     def _batch_lora_get_qkv(self, layer_id, input_embs, cache_k, cache_v, infer_state, no_lora_compute=False, no_lora_copy=False)->torch.Tensor:
+        # print("GETTING LROA QKV", not no_lora_compute and self.fair_strategy)
         base_model = self.base_model
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]
 
+        x = input_embs.view(-1, base_layer_infer.embed_dim_)
         # q (bs, H)
         q = torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.q_weight_)
          # @TODO: fix me, filter requests querying only base model
         assert(len(q)==len(self.req_bins))
 
-        if not no_lora_compute:
+        # If using fair strategty # TODO: Add condition where no popular adapter is set
+        if not no_lora_compute and self.fair_strategy:
+            # print("using fair strategy q")
+            # buffers
+            delta_qA = self.delta[0]
+
+            # 1. subtract popular LoRA for non-pop rows
+            # sub_bins = self._get_adapter_bins_for_sub_popular()
+            # TODO: Temporary Workaround, We subtract by all because current SLoRA code does not support when adapter is "None"
+            sub_bins = torch.full_like(self.req_bins, fill_value=self.popular_adapter_id)
+
+            if sub_bins is not None:
+                # temp buffer for LoRA_pop output
+                lora_pop_q = torch.zeros_like(q)
+
+                # compute delta = x A_pop, then lora_pop_q = delta B_pop
+                # Verify if we are subtracting the right one, we should be subtracting the popular adapaters
+                dispatch_bgmv(delta_qA, x, 
+                          self.key_buffer[layer_id], 
+                          self.infer_adapter.a_start, self.infer_adapter.a_len, 
+                          self.infer_adapter.a_loc, sub_bins, 0, self.infer_adapter.a_scaling)
+                dispatch_bgmv(lora_pop_q, delta_qA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                          self.infer_adapter.a_len, self.infer_adapter.a_loc, 
+                          sub_bins, 0, self.infer_adapter.a_scaling)
+
+                # q = x W_pop - LoRA_pop(x) for non-pop rows, untouched for pop rows
+                q.sub_(lora_pop_q)
+                
+            # 2. add current adapter LoRA for non-pop rows, skip pop rows
+            # add_bins = self._get_adapter_bins_for_add_current()
+            # TODO: Temporary Workaround, We subtract by all because current SLoRA code does not support when adapter is "None"
+            add_bins = self.req_bins
+
+            if add_bins is not None:
+                dispatch_bgmv(delta_qA, x, 
+                          self.key_buffer[layer_id], 
+                          self.infer_adapter.a_start, self.infer_adapter.a_len, 
+                          self.infer_adapter.a_loc, add_bins, 0, self.infer_adapter.a_scaling)
+                dispatch_bgmv(q, delta_qA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                            self.infer_adapter.a_len, self.infer_adapter.a_loc, 
+                            add_bins, 0, self.infer_adapter.a_scaling)
+                
+        elif not no_lora_compute:
             # mark_start("get_q")
             delta_qA = self.delta[0]
             dispatch_bgmv(delta_qA, input_embs.view(-1, base_layer_infer.embed_dim_), 
@@ -278,10 +363,55 @@ class LoraUnorderedBatchInfer:
                           infer_state.position_cos, infer_state.position_sin)
 
         # k (bs, H)
-        torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.k_weight_,
-                 out=cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_))
+        # torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.k_weight_,
+        #          out=cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_))
+        k_out = cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_)
+        torch.mm(x, base_layer_weight.k_weight_, out=k_out)
 
-        if not no_lora_compute:
+        # If using fair strategty # TODO: Add condition where no popular adapter is set
+        if not no_lora_compute and self.fair_strategy:
+            # print("using fair strategy k")
+            # buffers
+            delta_kA = self.delta[1]
+
+            # 1. subtract popular LoRA for non-pop rows
+            # sub_bins = self._get_adapter_bins_for_sub_popular()
+            # TODO: Temporary Workaround, We subtract by all because current SLoRA code does not support when adapter is "None"
+            sub_bins = torch.full_like(self.req_bins, fill_value=self.popular_adapter_id)
+
+            if sub_bins is not None:
+                # temp buffer for LoRA_pop output
+                lora_pop_k = torch.zeros_like(k_out)
+
+                # compute delta = x A_pop, then lora_pop_q = delta B_pop
+                # Verify if we are subtracting the right one, we should be subtracting the popular adapaters
+                dispatch_bgmv(delta_kA, x, 
+                          self.key_buffer[layer_id], 
+                          self.infer_adapter.a_start, self.infer_adapter.a_len, 
+                          self.infer_adapter.a_loc, sub_bins, 1, self.infer_adapter.a_scaling)
+                dispatch_bgmv(lora_pop_k, delta_kA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                          self.infer_adapter.a_len, self.infer_adapter.a_loc, 
+                          sub_bins, 1, self.infer_adapter.a_scaling)
+
+                # q = x W_pop - LoRA_pop(x) for non-pop rows, untouched for pop rows
+                k_out.sub_(lora_pop_k)
+                
+            # 2. add current adapter LoRA for non-pop rows, skip pop rows
+            # add_bins = self._get_adapter_bins_for_add_current()
+            # TODO: Temporary Workaround, We subtract by all because current SLoRA code does not support when adapter is "None"
+            add_bins = self.req_bins
+
+
+            if add_bins is not None:
+                dispatch_bgmv(delta_kA, x, 
+                          self.key_buffer[layer_id], 
+                          self.infer_adapter.a_start, self.infer_adapter.a_len, 
+                          self.infer_adapter.a_loc, add_bins, 1, self.infer_adapter.a_scaling)
+                dispatch_bgmv(k_out, delta_kA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                            self.infer_adapter.a_len, self.infer_adapter.a_loc, 
+                            add_bins, 1, self.infer_adapter.a_scaling)
+
+        elif not no_lora_compute:
             # mark_start("get_k")
             delta_kA = self.delta[1]
             dispatch_bgmv(delta_kA, input_embs.view(-1, base_layer_infer.embed_dim_), 
@@ -298,10 +428,55 @@ class LoraUnorderedBatchInfer:
         rotary_emb_fwd(cache_k, infer_state.position_cos, infer_state.position_sin)
 
         # v (bs, H)
-        torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.v_weight_,
-                 out=cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_))
+        # torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.v_weight_,
+        #          out=cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_))
+        v_out = cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_)
+        torch.mm(x, base_layer_weight.v_weight_, out=v_out)
 
-        if not no_lora_compute:
+        # If using fair strategty # TODO: Add condition where no popular adapter is set
+        if not no_lora_compute and self.fair_strategy:
+            # print("using fair strategy v")
+            # buffers
+            delta_vA = self.delta[2]
+
+            # 1. subtract popular LoRA for non-pop rows
+            # sub_bins = self._get_adapter_bins_for_sub_popular()
+            # TODO: Temporary Workaround, We subtract by all because current SLoRA code does not support when adapter is "None"
+            sub_bins = torch.full_like(self.req_bins, fill_value=self.popular_adapter_id)
+
+
+            if sub_bins is not None:
+                # temp buffer for LoRA_pop output
+                lora_pop_v = torch.zeros_like(v_out)
+
+                # compute delta = x A_pop, then lora_pop_q = delta B_pop
+                # Verify if we are subtracting the right one, we should be subtracting the popular adapaters
+                dispatch_bgmv(delta_vA, x, 
+                          self.key_buffer[layer_id], 
+                          self.infer_adapter.a_start, self.infer_adapter.a_len, 
+                          self.infer_adapter.a_loc, sub_bins, 2, self.infer_adapter.a_scaling)
+                dispatch_bgmv(lora_pop_v, delta_vA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                          self.infer_adapter.a_len, self.infer_adapter.a_loc, 
+                          sub_bins, 2, self.infer_adapter.a_scaling)
+
+                # q = x W_pop - LoRA_pop(x) for non-pop rows, untouched for pop rows
+                v_out.sub_(lora_pop_v)
+                
+            # 2. add current adapter LoRA for non-pop rows, skip pop rows
+            # add_bins = self._get_adapter_bins_for_add_current()
+            # TODO: Temporary Workaround, We subtract by all because current SLoRA code does not support when adapter is "None"
+            add_bins = self.req_bins
+
+
+            if add_bins is not None:
+                dispatch_bgmv(delta_vA, x, 
+                          self.key_buffer[layer_id], 
+                          self.infer_adapter.a_start, self.infer_adapter.a_len, 
+                          self.infer_adapter.a_loc, add_bins, 2, self.infer_adapter.a_scaling)
+                dispatch_bgmv(v_out, delta_vA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                            self.infer_adapter.a_len, self.infer_adapter.a_loc, 
+                            add_bins, 2, self.infer_adapter.a_scaling)
+        elif not no_lora_compute:
             # mark_start("get_v")
             delta_vA = self.delta[2]
             dispatch_bgmv(delta_vA, input_embs.view(-1, base_layer_infer.embed_dim_), 
@@ -430,10 +605,44 @@ class LoraUnorderedBatchInfer:
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]
         
-        o = torch.mm(input.view(-1, base_layer_infer.embed_dim_),
-                          base_layer_weight.o_weight_)
-        
-        if not no_lora_compute:
+        x = input.view(-1, base_layer_infer.embed_dim_)
+        o = torch.mm(x, base_layer_weight.o_weight_)
+        # If using fair strategty # TODO: Add condition where no popular adapter is set
+        if not no_lora_compute and self.fair_strategy:
+            # print("using fair strategy o")
+            # buffers
+            delta_oA = self.delta[0]
+
+            # subtract popular LoRA for non-pop rows
+            # sub_bins = self._get_adapter_bins_for_sub_popular()
+            # TODO: Temporary Workaround, We subtract by all because current SLoRA code does not support when adapter is "None"
+            sub_bins = torch.full_like(self.req_bins, fill_value=self.popular_adapter_id)
+
+
+            if sub_bins is not None:
+                lora_pop_o = torch.zeros_like(o)
+                dispatch_bgmv(delta_oA, x, self.key_buffer[layer_id],
+                              self.infer_adapter.a_start, self.infer_adapter.a_len,
+                              self.infer_adapter.a_loc, sub_bins, 3, self.infer_adapter.a_scaling)
+                dispatch_bgmv(lora_pop_o, delta_oA, self.value_buffer[layer_id],
+                              self.infer_adapter.a_start, self.infer_adapter.a_len,
+                              self.infer_adapter.a_loc, sub_bins, 3, self.infer_adapter.a_scaling)
+                o.sub_(lora_pop_o)
+
+            # add current adapter LoRA for non-pop rows
+            # add_bins = self._get_adapter_bins_for_add_current()
+            # TODO: Temporary Workaround, We subtract by all because current SLoRA code does not support when adapter is "None"
+            add_bins = self.req_bins
+
+
+            if add_bins is not None:
+                dispatch_bgmv(delta_oA, x, self.key_buffer[layer_id],
+                              self.infer_adapter.a_start, self.infer_adapter.a_len,
+                              self.infer_adapter.a_loc, add_bins, 3, self.infer_adapter.a_scaling)
+                dispatch_bgmv(o, delta_oA, self.value_buffer[layer_id],
+                              self.infer_adapter.a_start, self.infer_adapter.a_len,
+                              self.infer_adapter.a_loc, add_bins, 3, self.infer_adapter.a_scaling)
+        elif not no_lora_compute:
             # mark_start("get_o")
             delta_oA = self.delta[0]
             dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 

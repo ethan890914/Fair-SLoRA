@@ -57,8 +57,10 @@ class ModelRpcServer(rpyc.Service):
 
         try:
             self.model_type = model_cfg["model_type"]
+            print("############## MY model type: ", self.model_type)
             if self.model_type == "llama":
                 if "num_key_value_heads" in model_cfg.keys():
+                    print("Model is Llama2TpPartModel")
                     self.model = Llama2TpPartModel(rank_id, world_size, weight_dir,
                                                     max_total_token_num,
                                                     mem_adapter_size=input_params.pool_size_lora,
@@ -66,6 +68,7 @@ class ModelRpcServer(rpyc.Service):
                                                     dummy=input_params.dummy)
                     
                 else:
+                    print("Model is LlamaTpPartModel")
                     self.model = LlamaTpPartModel(rank_id, world_size, weight_dir,
                                                     max_total_token_num,
                                                     mem_adapter_size=input_params.pool_size_lora,
@@ -92,6 +95,29 @@ class ModelRpcServer(rpyc.Service):
         self.adapter_id[None] = len(self.adapters)
         self.adapters.append(None)
 
+        ### NEW: pre-merge a single popular adapter into base weights
+        self.fair_strategy = self.input_params.fair_strategy
+        # Temporary, fix popular as adapter 0
+        # self.popular_adapter_dir = self.input_params.popular_adapter_dir
+        print("Adapter key names", list(self.adapter_id.keys()))
+        self.popular_adapter_dir = list(self.adapter_id.keys())[0]
+        print(f"MANUALLY SETTING POPULAR ADAPTER DIR TO {self.popular_adapter_dir}")
+        print(f"RPC Server: Fair Strategy is {self.fair_strategy}")
+        if self.fair_strategy:
+            print("merging and unmerging")
+            tmp = self.model.trans_layers_weight[0].q_weight_
+            tmp_sum = tmp.sum()
+            if self.popular_adapter_dir is not None:
+                self._merge_popular_into_base()
+                print("Comparing if same: ", (self.model.trans_layers_weight[0].q_weight_ == tmp).all())
+                print(self.model.trans_layers_weight[0].q_weight_.sum(), tmp_sum)
+                self._merge_popular_into_base(unmerge=True)
+                print("Comparing if same: ", (self.model.trans_layers_weight[0].q_weight_ == tmp).all())
+                print(self.model.trans_layers_weight[0].q_weight_.sum(), tmp_sum)
+            # Merge Popular adapter dir to base weight
+            self._merge_popular_into_base()
+        #################
+
         if input_params.no_mem_pool:
             head_num = self.model.config["num_attention_heads"]
             self.infer_adapter = NaiveInferAdapter.init(self.model.config["num_hidden_layers"],
@@ -105,6 +131,95 @@ class ModelRpcServer(rpyc.Service):
         set_random_seed(2147483647)
         return
 
+    # Function to merge the current popular adapter id to base model weight
+    # Also includes a flag to unmerge instead
+    def _merge_popular_into_base(self, unmerge=False):
+        if self.popular_adapter_dir not in self.adapter_id:
+            print(f"popular_adapter_dir {self.popular_adapter_dir} . Adapters: {self.adapter_id}")
+            print(f"[warn] popular_adapter_dir {self.popular_adapter_dir} not in adapter_id")
+            return
+        merge_scalar = 1
+        if not unmerge:
+            print(f"merging adapter {self.popular_adapter_dir} into base model weights")
+        else:
+            print(f"UNmerging adapter {self.popular_adapter_dir} into base model weights")
+            merge_scalar = -1
+        pop_idx = self.adapter_id[self.popular_adapter_dir]
+        pop_adapter = self.adapters[pop_idx]
+        print("Popular Adapter: ", pop_adapter)
+        if pop_adapter is None:
+            print("None Popular adapter")
+            return
+        
+        # Here we times scaling by merge scalar so if it is unmerge, we minus instead of plus
+        scaling = pop_adapter.scaling * merge_scalar # lora_alpha / r
+
+        # base_model weights for each transformer layer
+        base_layers_weight = self.model.trans_layers_weight
+        # device = base_weight_param.device
+        def merge_proj(base_weight_param, A, B, scaling, name):
+            if A is None or B is None:
+                return
+
+            # Ensure all on same device and in float32 for matmul
+            device = base_weight_param.device
+            A_dev = A.to(device=device, dtype=torch.float32)
+            B_dev = B.to(device=device, dtype=torch.float32)
+
+            delta = A_dev @ B_dev  # (in_dim, out_dim)
+            delta = (scaling * delta).to(dtype=base_weight_param.dtype)
+            # print("DELTAAA", delta.min(), delta.max(), delta)
+            with torch.no_grad():
+                base_weight_param.add_(delta)
+
+        for layer_id, layer_weight in enumerate(base_layers_weight):
+            # print(f"Merging layer: {layer_id}")
+            lora_layer = pop_adapter.layers[layer_id]
+
+            # q
+            if lora_layer.q_lora_A is not None and lora_layer.q_lora_B is not None:
+                # print("---Merging Q LORA")
+                delta_q = lora_layer.q_lora_A @ lora_layer.q_lora_B  # (H, H)
+                layer_weight.q_weight_ += scaling * delta_q
+            elif lora_layer.q_lora_A_home is not None and lora_layer.q_lora_B_home is not None:
+                # print("---Merging Q LORA home")
+                merge_proj(layer_weight.q_weight_, lora_layer.q_lora_A_home, lora_layer.q_lora_B_home, scaling, "q")
+                # delta_q = lora_layer.q_lora_A_home @ lora_layer.q_lora_B_home  # (H, H)
+                # layer_weight.q_weight_ += scaling * delta_q
+
+            # k
+            if lora_layer.k_lora_A is not None and lora_layer.k_lora_B is not None:
+                # print("---Merging K LORA")
+                delta_k = lora_layer.k_lora_A @ lora_layer.k_lora_B
+                layer_weight.k_weight_ += scaling * delta_k
+            elif lora_layer.k_lora_A_home is not None and lora_layer.k_lora_B_home is not None:
+                # print("---Merging K LORA home")
+                merge_proj(layer_weight.k_weight_, lora_layer.k_lora_A_home, lora_layer.k_lora_B_home, scaling, "k")
+
+                # delta_k = lora_layer.k_lora_A_home @ lora_layer.k_lora_B_home
+                # layer_weight.k_weight_ += scaling * delta_k
+
+            # v
+            if lora_layer.v_lora_A is not None and lora_layer.v_lora_B is not None:
+                # print("---Merging V LORA")
+                delta_v = lora_layer.v_lora_A @ lora_layer.v_lora_B
+                layer_weight.v_weight_ += scaling * delta_v
+            elif lora_layer.v_lora_A_home is not None and lora_layer.v_lora_B_home is not None:
+                # print("---Merging V LORA home")
+                merge_proj(layer_weight.v_weight_, lora_layer.v_lora_A_home, lora_layer.v_lora_B_home, scaling, "v")
+                # delta_v = lora_layer.v_lora_A_home @ lora_layer.v_lora_B_home
+                # layer_weight.v_weight_ += scaling * delta_v
+
+            # o
+            if lora_layer.o_lora_A is not None and lora_layer.o_lora_B is not None:
+                # print("---Merging O LORA")
+                delta_o = lora_layer.o_lora_A @ lora_layer.o_lora_B
+                layer_weight.o_weight_ += scaling * delta_o
+            elif lora_layer.o_lora_A_home is not None and lora_layer.o_lora_B_home is not None:
+                # print("---Merging O LORA home")
+                merge_proj(layer_weight.o_weight_, lora_layer.o_lora_A_home, lora_layer.o_lora_B_home, scaling, "o")
+                # delta_o = lora_layer.o_lora_A_home @ lora_layer.o_lora_B_home
+                # layer_weight.o_weight_ += scaling * delta_o
 
     @torch.no_grad()
     def exposed_load_adapters(self, adapter_dirs, prefetch=False):
@@ -214,6 +329,16 @@ class ModelRpcServer(rpyc.Service):
             engine = self.model
         else:
             adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in batch.adapter_dirs]
+            
+            # Prepare input to LoRA batch inference object creation
+            if self.fair_strategy:
+                popular_adapter_id = None
+                none_adapter_id = self.adapter_id[None]
+
+                if self.popular_adapter_dir is not None:
+                    if self.popular_adapter_dir in self.adapter_id:
+                        popular_adapter_id = self.adapter_id[self.popular_adapter_dir]
+
             if self.input_params.no_lora_compute:
                 engine = LoraUnorderedBatchInfer(self.model, adapters)
             elif self.input_params.bmm:
@@ -231,7 +356,12 @@ class ModelRpcServer(rpyc.Service):
                 adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in compressed_dirs]
                 engine = LoraBmmInfer(self.model, adapters, adapter_sep)
             else:
-                engine = LoraUnorderedBatchInfer(self.model, adapters, infer_adapter=self.infer_adapter)
+                engine = LoraUnorderedBatchInfer(self.model, 
+                                                 adapters, 
+                                                 infer_adapter=self.infer_adapter, 
+                                                 fair_strategy=self.fair_strategy,
+                                                 popular_adapter_id=popular_adapter_id, 
+                                                 none_adapter_id=none_adapter_id)
             kwargs["no_lora_compute"] = self.input_params.no_lora_compute
             # kwargs["no_lora_copy"] = self.input_params.no_lora_copy 
 

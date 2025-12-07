@@ -400,6 +400,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
                                bmm=args.bmm,
                                no_lora=args.no_lora,
                                fair_weights=args.fair_weights,
+                               fair_strategy=args.fair_strategy,
                               )
 
     try:

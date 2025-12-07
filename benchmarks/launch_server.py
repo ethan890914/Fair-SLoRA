@@ -24,8 +24,11 @@ if __name__ == "__main__":
     parser.add_argument("--batch-num-adapters", type=int, default=None)
     parser.add_argument("--enable-abort", action="store_true")
     parser.add_argument("--vllm-mem-ratio", type=float, default=0.95)
+    parser.add_argument("--fair_strategy", action="store_true")
+    
     args = parser.parse_args()
 
+    print("launch server args: ", args)
     base_model = BASE_MODEL[args.model_setting]
     adapter_dirs = LORA_DIR[args.model_setting]
 
@@ -71,6 +74,9 @@ if __name__ == "__main__":
         # cmd += " --no-kernel"
         if args.bmm:
             cmd += " --bmm"
+        if args.fair_strategy:
+            cmd += " --fair_strategy"
+        print("final slora cmd: ", cmd)
 
     elif args.backend == "lightllm":
         cmd = f"python -m lightllm.server.api_server" \
