@@ -306,6 +306,7 @@ if __name__ == "__main__":
     parser.add_argument("--append", action="store_true")
 
     parser.add_argument("--breakdown", action="store_true")
+    parser.add_argument("--fair", action="store_true")
     parser.add_argument("--no-lora-compute", action="store_true")
     parser.add_argument("--no-lora-swap", action="store_true")
     parser.add_argument("--no-lora-copy", action="store_true")
@@ -333,7 +334,7 @@ if __name__ == "__main__":
     if args.debug or args.breakdown:
         args.output = "debug_" + args.output
 
-    suites = get_all_suites(mode=args.mode, debug=args.debug, suite=args.suite, breakdown=args.breakdown)
+    suites = get_all_suites(mode=args.mode, debug=args.debug, suite=args.suite, breakdown=args.breakdown, fair=args.fair)
 
     if not args.append:
         os.system(f"rm {args.output}")

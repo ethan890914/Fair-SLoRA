@@ -146,15 +146,16 @@ class ModelRpcServer(rpyc.Service):
             return
         merge_scalar = 1
         if not unmerge:
-            print(f"merging adapter {self.popular_adapter_dir} into base model weights")
+            pass
+            # print(f"merging adapter {self.popular_adapter_dir} into base model weights")
         else:
-            print(f"Unmerging adapter {self.popular_adapter_dir} into base model weights")
+            # print(f"Unmerging adapter {self.popular_adapter_dir} into base model weights")
             merge_scalar = -1
         pop_idx = self.adapter_id[self.popular_adapter_dir]
         pop_adapter = self.adapters[pop_idx]
-        print("Popular Adapter: ", pop_adapter)
+        # print("Popular Adapter: ", pop_adapter)
         if pop_adapter is None:
-            print("None Popular adapter")
+            # print("None Popular adapter")
             return
         
         # Here we times scaling by merge scalar so if it is unmerge, we minus instead of plus
@@ -268,7 +269,7 @@ class ModelRpcServer(rpyc.Service):
 
             # change popular
             if self.window.count(local_popular) > self.popular_threshold: # swap to new
-                print("Swapping Popular", local_popular)
+                # print("Swapping Popular", local_popular)
                 if self.popular_adapter_dir is not None: # old 
                     self._merge_popular_into_base(unmerge=True)
                 self.popular_adapter_dir = local_popular

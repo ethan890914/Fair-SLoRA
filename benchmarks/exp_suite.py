@@ -31,7 +31,17 @@ BenchmarkConfig = namedtuple(
     ]
 )
 
-
+fair_suite = {
+    "default": BenchmarkConfig(
+        num_adapters = [1, 10, 50, 100],
+        alpha = [0.1, 0.25, 0.5, 0.75, 1],
+        req_rate = [2.5],
+        cv = [1],
+        duration = [60],
+        input_range = [[8, 512]],
+        output_range = [[8, 512]],
+    )
+}
 paper_suite = {
     "ablation-no-mem": BenchmarkConfig(
         num_adapters = [1, 10, 25, 50, 100, 200],
@@ -341,13 +351,15 @@ debug_suite = {
 }
 
 
-def get_all_suites(mode, debug=False, suite=None, breakdown=False):
+def get_all_suites(mode, debug=False, suite=None, breakdown=False, fair=False):
     assert not (debug and breakdown)
     assert suite is not None
     if debug:
         exps = [{suite: debug_suite[suite]}]
     elif breakdown:
         exps = [{suite: breakdown_suite[suite]}]
+    elif fair:
+        exps = [{suite: fair_suite[suite]}]
     else:
         exps = [{suite: paper_suite[suite]}]
 
