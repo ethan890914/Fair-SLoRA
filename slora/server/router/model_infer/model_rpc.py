@@ -50,6 +50,12 @@ class ModelRpcServer(rpyc.Service):
 
         self.cache = {}
 
+        # popularity algo
+        self.window = []
+        self.window_len = 10
+        self.popular_adapter = None
+        self.popular_threshold = 5
+
         dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
         torch.cuda.set_device(rank_id)
 
@@ -251,6 +257,17 @@ class ModelRpcServer(rpyc.Service):
                 if adapter_dir is not None and adapter_dir not in reserve_dirs:
                     self.adapters[id].offload_from_gpu()
 
+    def run_popularity_algo(self, adapters):
+        self.window = self.window + adapters
+        if len(self.window) < self.window_len:
+            return
+        else:
+            self.window = self.window[-self.window_len:]
+            # print(self.window)
+            local_popular = max(self.window, key=self.window.count)
+            if self.window.count(local_popular) > self.popular_threshold:
+                print("Swapping Popular", local_popular)
+                self.popular_adapter = local_popular
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def exposed_add_batch(self, batch_id, reqs, dtype):
@@ -262,6 +279,10 @@ class ModelRpcServer(rpyc.Service):
         else:
             assert False, "error dtype"
         batch_data = InferBatch.init_batch(batch_id, reqs, dtype, torch.cuda.current_device(), self.model.mem_manager, self.model.vocab_size)
+        print("*" * 50)
+        self.run_popularity_algo(batch_data.adapter_dirs)
+        # print(self.popular_adapter, self.window)
+        print("*" * 50)
         self.cache[batch_id] = batch_data
         return
     
