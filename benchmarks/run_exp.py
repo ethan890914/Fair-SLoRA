@@ -238,6 +238,7 @@ def run_exp(model_setting, backend, server, config, output, mode, seed=42, debug
     print([(k, v) for k, v in zip(BenchmarkConfig._fields, config)])
 
     num_adapters, alpha, req_rate, cv, duration, input_range, output_range = config
+    # num_adapter = 20
     # assert duration >= 30
     if mode == "synthetic":
         base_model = BASE_MODEL[model_setting]
