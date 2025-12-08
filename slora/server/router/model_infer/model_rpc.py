@@ -53,7 +53,7 @@ class ModelRpcServer(rpyc.Service):
         # popularity algo
         self.window = []
         self.window_len = 10
-        self.popular_adapter = None
+        self.popular_adapter_dir = None
         self.popular_threshold = 5
 
         dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
@@ -105,23 +105,23 @@ class ModelRpcServer(rpyc.Service):
         self.fair_strategy = self.input_params.fair_strategy
         # Temporary, fix popular as adapter 0
         # self.popular_adapter_dir = self.input_params.popular_adapter_dir
-        print("Adapter key names", list(self.adapter_id.keys()))
-        self.popular_adapter_dir = list(self.adapter_id.keys())[0]
-        print(f"MANUALLY SETTING POPULAR ADAPTER DIR TO {self.popular_adapter_dir}")
-        print(f"RPC Server: Fair Strategy is {self.fair_strategy}")
-        if self.fair_strategy:
-            print("merging and unmerging")
-            tmp = self.model.trans_layers_weight[0].q_weight_
-            tmp_sum = tmp.sum()
-            if self.popular_adapter_dir is not None:
-                self._merge_popular_into_base()
-                print("Comparing if same: ", (self.model.trans_layers_weight[0].q_weight_ == tmp).all())
-                print(self.model.trans_layers_weight[0].q_weight_.sum(), tmp_sum)
-                self._merge_popular_into_base(unmerge=True)
-                print("Comparing if same: ", (self.model.trans_layers_weight[0].q_weight_ == tmp).all())
-                print(self.model.trans_layers_weight[0].q_weight_.sum(), tmp_sum)
-            # Merge Popular adapter dir to base weight
-            self._merge_popular_into_base()
+        # print("Adapter key names", list(self.adapter_id.keys()))
+        # self.popular_adapter_dir = list(self.adapter_id.keys())[0]
+        # print(f"MANUALLY SETTING POPULAR ADAPTER DIR TO {self.popular_adapter_dir}")
+        # print(f"RPC Server: Fair Strategy is {self.fair_strategy}")
+        # if self.fair_strategy:
+        #     print("merging and unmerging")
+        #     tmp = self.model.trans_layers_weight[0].q_weight_
+        #     tmp_sum = tmp.sum()
+        #     if self.popular_adapter_dir is not None:
+        #         self._merge_popular_into_base()
+        #         print("Comparing if same: ", (self.model.trans_layers_weight[0].q_weight_ == tmp).all())
+        #         print(self.model.trans_layers_weight[0].q_weight_.sum(), tmp_sum)
+        #         self._merge_popular_into_base(unmerge=True)
+        #         print("Comparing if same: ", (self.model.trans_layers_weight[0].q_weight_ == tmp).all())
+        #         print(self.model.trans_layers_weight[0].q_weight_.sum(), tmp_sum)
+        #     # Merge Popular adapter dir to base weight
+        #     self._merge_popular_into_base()
         #################
 
         if input_params.no_mem_pool:
@@ -148,7 +148,7 @@ class ModelRpcServer(rpyc.Service):
         if not unmerge:
             print(f"merging adapter {self.popular_adapter_dir} into base model weights")
         else:
-            print(f"UNmerging adapter {self.popular_adapter_dir} into base model weights")
+            print(f"Unmerging adapter {self.popular_adapter_dir} into base model weights")
             merge_scalar = -1
         pop_idx = self.adapter_id[self.popular_adapter_dir]
         pop_adapter = self.adapters[pop_idx]
@@ -265,9 +265,20 @@ class ModelRpcServer(rpyc.Service):
             self.window = self.window[-self.window_len:]
             # print(self.window)
             local_popular = max(self.window, key=self.window.count)
-            if self.window.count(local_popular) > self.popular_threshold:
+
+            # change popular
+            if self.window.count(local_popular) > self.popular_threshold: # swap to new
                 print("Swapping Popular", local_popular)
-                self.popular_adapter = local_popular
+                if self.popular_adapter_dir is not None: # old 
+                    self._merge_popular_into_base(unmerge=True)
+                self.popular_adapter_dir = local_popular
+                self._merge_popular_into_base()
+            else: # swap to None
+                if self.popular_adapter_dir is not None: # unmerge if there is an old one
+                    self._merge_popular_into_base(unmerge=True)
+                self.popular_adapter_dir = None
+
+                
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def exposed_add_batch(self, batch_id, reqs, dtype):
@@ -279,10 +290,10 @@ class ModelRpcServer(rpyc.Service):
         else:
             assert False, "error dtype"
         batch_data = InferBatch.init_batch(batch_id, reqs, dtype, torch.cuda.current_device(), self.model.mem_manager, self.model.vocab_size)
-        print("*" * 50)
-        self.run_popularity_algo(batch_data.adapter_dirs)
-        # print(self.popular_adapter, self.window)
-        print("*" * 50)
+        # print("*" * 50)
+        if self.fair_strategy:
+            self.run_popularity_algo(batch_data.adapter_dirs)
+        # print("*" * 50)
         self.cache[batch_id] = batch_data
         return
     
