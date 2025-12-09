@@ -269,11 +269,12 @@ class ModelRpcServer(rpyc.Service):
 
             # change popular
             if self.window.count(local_popular) > self.popular_threshold: # swap to new
-                # print("Swapping Popular", local_popular)
-                if self.popular_adapter_dir is not None: # old 
-                    self._merge_popular_into_base(unmerge=True)
-                self.popular_adapter_dir = local_popular
-                self._merge_popular_into_base()
+                # only run swap logic if the new local popular is different from the current loaded
+                if local_popular != self.popular_adapter_dir:
+                    if self.popular_adapter_dir is not None: # old 
+                        self._merge_popular_into_base(unmerge=True)
+                    self.popular_adapter_dir = local_popular
+                    self._merge_popular_into_base()
             else: # swap to None
                 if self.popular_adapter_dir is not None: # unmerge if there is an old one
                     self._merge_popular_into_base(unmerge=True)
