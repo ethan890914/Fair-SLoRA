@@ -126,10 +126,12 @@ class ModelRpcServer(rpyc.Service):
 
         if input_params.no_mem_pool:
             head_num = self.model.config["num_attention_heads"]
+            print("naive infer adapter")
             self.infer_adapter = NaiveInferAdapter.init(self.model.config["num_hidden_layers"],
                                                         head_num,
                                                         self.model.config["hidden_size"] // head_num)
         else:
+            print("infer adapter")
             self.infer_adapter = InferAdapter.init(self.model.mem_manager,
                                                    prefetch_stream)
         ''' finish init adapters '''
@@ -271,13 +273,14 @@ class ModelRpcServer(rpyc.Service):
             if self.window.count(local_popular) > self.popular_threshold: # swap to new
                 # only run swap logic if the new local popular is different from the current loaded
                 if local_popular != self.popular_adapter_dir:
+                    print("##### Fair S-LoRA ##### Merging new popular adapter: new popular adapter: ", local_popular)
                     if self.popular_adapter_dir is not None: # old 
                         self._merge_popular_into_base(unmerge=True)
                     self.popular_adapter_dir = local_popular
                     self._merge_popular_into_base()
-            else: # swap to None
-                if self.popular_adapter_dir is not None: # unmerge if there is an old one
-                    self._merge_popular_into_base(unmerge=True)
+            elif self.popular_adapter_dir is not None: # unmerge if there is an old one
+                print("##### Fair S-LoRA ##### Swapping to NO popular adapter")
+                self._merge_popular_into_base(unmerge=True)
                 self.popular_adapter_dir = None
 
                 
@@ -369,9 +372,16 @@ class ModelRpcServer(rpyc.Service):
             popular_adapter_id = None
             none_adapter_id = self.adapter_id[None]
 
+            # if self.popular_adapter_dir is not None:
+            #     if self.popular_adapter_dir in self.adapter_id:
+            #         popular_adapter_id = self.adapter_id[self.popular_adapter_dir]
+            # Identify none adapter and popular adapter id
+            none_adapter_id = self.infer_adapter.none_adapter_id 
+            popular_adapter_id = None
             if self.popular_adapter_dir is not None:
-                if self.popular_adapter_dir in self.adapter_id:
-                    popular_adapter_id = self.adapter_id[self.popular_adapter_dir]
+                if self.popular_adapter_dir in self.infer_adapter.idx_map:
+                    popular_adapter_id = self.infer_adapter.idx_map[self.popular_adapter_dir]
+
 
             if self.input_params.no_lora_compute:
                 engine = LoraUnorderedBatchInfer(self.model, adapters)

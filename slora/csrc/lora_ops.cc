@@ -125,12 +125,107 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Ten
               " dtype=", x.scalar_type());
 }
 
+void dispatch_bgmv_fair(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Tensor start_indicies,
+                   torch::Tensor lora_ranks, torch::Tensor loc_indicies, torch::Tensor indicies,
+                   int64_t qkvo, torch::Tensor lora_scales, int64_t none_id) {
+  CHECK_INPUT(y);
+  CHECK_INPUT(x);
+  CHECK_INPUT(w);
+  CHECK_INPUT(start_indicies);
+  CHECK_INPUT(lora_ranks);
+  CHECK_INPUT(loc_indicies);
+  CHECK_INPUT(indicies);
+
+  CHECK_DIM(2, y);
+  CHECK_DIM(2, x);
+  CHECK_DIM(3, w); // [size, head_dim, head_size]
+  CHECK_DIM(1, indicies);
+
+  CHECK_EQ(indicies.size(0), x.size(0));
+  CHECK_EQ(y.size(0), x.size(0));
+
+  // Create mask of which rows need to launch kernel
+  // Pass in none_id for faster time
+  at::Tensor none_mask = indicies.eq(none_id);
+
+  // Mixed case: now pay for nonzero + subset
+  at::Tensor active_idx = at::nonzero(~none_mask).view(-1);
+  // parse new x y
+  auto x_active = x.index_select(0, active_idx).contiguous();
+  auto y_active = y.index_select(0, active_idx).contiguous();
+  auto indicies_active = indicies.index_select(0, active_idx).contiguous();
+
+  TORCH_CHECK(y_active.size(0) == active_idx.numel(), "y_active rows mismatch");
+  TORCH_CHECK(y_active.size(1) == y.size(1), "y_active cols mismatch");
+
+  // Debug prints to ensure actual reduction
+  // Original tensors
+  // printf("ORIGINAL x: B=%ld, H_in=%ld\n", x.size(0), x.size(1));
+  // printf("ORIGINAL y: B=%ld, H_out=%ld\n", y.size(0), y.size(1));
+  // printf("ORIGINAL indicies: B=%ld\n", indicies.size(0));
+
+  // // Active rows
+  // printf("ACTIVE rows = %ld\n", active_idx.numel());
+
+  // // Sub tensors
+  // printf("SUB x: B_sub=%ld, H_in=%ld\n", x_active.size(0), x_active.size(1));
+  // printf("SUB y: B_sub=%ld, H_out=%ld\n", y_active.size(0), y_active.size(1));
+  // printf("SUB indicies: B_sub=%ld\n", indicies_active.size(0));
+
+  // Similar to original dispatch function, only swapped to new x_active, y_active, and indicies_active
+  int64_t B = x_active.size(0);
+  int64_t h_in = x_active.size(1);
+  int64_t h_out = y_active.size(1);
+  
+  bool ok = false;
+  if (h_in < 65536 && h_out < 65536) {
+    switch (x_active.scalar_type()) {
+      case at::ScalarType::Half:
+        ok = launch_bgmv_kernel(static_cast<nv_half*>(y_active.data_ptr()),
+                                static_cast<nv_half*>(x_active.data_ptr()),
+                                static_cast<nv_half*>(w.data_ptr()),
+                                start_indicies.data_ptr<int64_t>(),
+                                lora_ranks.data_ptr<int64_t>(),
+                                loc_indicies.data_ptr<int64_t>(),
+                                indicies_active.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
+                                static_cast<nv_half*>(lora_scales.data_ptr()));
+        break;
+      case at::ScalarType::BFloat16:
+        ok = launch_bgmv_kernel(static_cast<nv_bfloat16*>(y_active.data_ptr()),
+                                static_cast<nv_bfloat16*>(x_active.data_ptr()),
+                                static_cast<nv_bfloat16*>(w.data_ptr()),
+                                start_indicies.data_ptr<int64_t>(),
+                                lora_ranks.data_ptr<int64_t>(),
+                                loc_indicies.data_ptr<int64_t>(),
+                                indicies_active.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
+                                static_cast<nv_bfloat16*>(lora_scales.data_ptr()));
+        break;
+      default:
+        break;
+    }
+  }
+  TORCH_CHECK(ok, "No suitable kernel.", " h_in=", h_in, " h_out=", h_out,
+              " dtype=", x_active.scalar_type());
+
+  // Write the updated y_active back into the original y at active_idx
+  y.index_copy_(0, active_idx, y_active);
+
+  return;
+  // }
+
+
+  
+}
+
 }  // namespace
 
 //====== pybind ======
 
 #define DEFINE_pybind(name) m.def(#name, &name, #name);
 
+// Bind new dispatch bgmv to pybind
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dispatch_bgmv", &dispatch_bgmv, "dispatch_bgmv");
+  m.def("dispatch_bgmv_fair", &dispatch_bgmv, "dispatch_bgmv_fair");
 }
