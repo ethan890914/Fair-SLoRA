@@ -333,7 +333,7 @@ class LoraUnorderedBatchInfer:
             # 1. subtract popular LoRA for non-pop rows
 
             # Compare if sub_bins and add_bins are all popular adapter requests, if so skip completely
-            if self.sub_bins is not None and not self.any_active: 
+            if self.sub_bins is not None and self.any_active: 
                 # print("running double compute")
                 # temp buffer for LoRA_pop output
                 lora_pop_q = torch.zeros_like(q)
@@ -358,7 +358,7 @@ class LoraUnorderedBatchInfer:
                 q.sub_(lora_pop_q)
                 
             # 2. add current adapter LoRA for non-pop rows, skip pop rows
-            if self.add_bins is not None and not self.any_active: 
+            if self.add_bins is not None and self.any_active: 
                 # print("running double compute")
                 dispatch_bgmv_fair(delta_qA, x, 
                           self.key_buffer[layer_id], 
@@ -398,7 +398,7 @@ class LoraUnorderedBatchInfer:
             delta_kA = self.delta[1]
 
             # 1. subtract popular LoRA for non-pop rows
-            if self.sub_bins is not None and not self.any_active: # and prob_to_run_double_compute:
+            if self.sub_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
                 # temp buffer for LoRA_pop output
                 lora_pop_k = torch.zeros_like(k_out)
@@ -417,7 +417,7 @@ class LoraUnorderedBatchInfer:
                 k_out.sub_(lora_pop_k)
                 
             # 2. add current adapter LoRA for non-pop rows, skip pop rows
-            if self.add_bins is not None and not self.any_active: #  and prob_to_run_double_compute:
+            if self.add_bins is not None and self.any_active: #  and prob_to_run_double_compute:
                 # print("running double compute")
                 dispatch_bgmv_fair(delta_kA, x, 
                           self.key_buffer[layer_id], 
@@ -457,7 +457,7 @@ class LoraUnorderedBatchInfer:
             delta_vA = self.delta[2]
 
             # 1. subtract popular LoRA for non-pop rows
-            if self.sub_bins is not None and not self.any_active: # and prob_to_run_double_compute:
+            if self.sub_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
                 # temp buffer for LoRA_pop output
                 lora_pop_v = torch.zeros_like(v_out)
@@ -476,7 +476,7 @@ class LoraUnorderedBatchInfer:
                 v_out.sub_(lora_pop_v)
                 
             # 2. add current adapter LoRA for non-pop rows, skip pop rows
-            if self.add_bins is not None and not self.any_active: # and prob_to_run_double_compute:
+            if self.add_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
                 dispatch_bgmv_fair(delta_vA, x, 
                           self.key_buffer[layer_id], 
@@ -626,7 +626,7 @@ class LoraUnorderedBatchInfer:
             delta_oA = self.delta[0]
 
             # subtract popular LoRA for non-pop rows
-            if self.sub_bins is not None and not self.any_active: # and prob_to_run_double_compute:
+            if self.sub_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
                 lora_pop_o = torch.zeros_like(o)
                 dispatch_bgmv_fair(delta_oA, x, self.key_buffer[layer_id],
@@ -638,7 +638,7 @@ class LoraUnorderedBatchInfer:
                 o.sub_(lora_pop_o)
 
             # add current adapter LoRA for non-pop rows
-            if self.add_bins is not None and not self.any_active: # and prob_to_run_double_compute:
+            if self.add_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
                 dispatch_bgmv_fair(delta_oA, x, self.key_buffer[layer_id],
                               self.infer_adapter.a_start, self.infer_adapter.a_len,
