@@ -227,5 +227,5 @@ void dispatch_bgmv_fair(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dispatch_bgmv", &dispatch_bgmv, "dispatch_bgmv");
-  m.def("dispatch_bgmv_fair", &dispatch_bgmv, "dispatch_bgmv_fair");
+  m.def("dispatch_bgmv_fair", &dispatch_bgmv_fair, "dispatch_bgmv_fair");
 }
