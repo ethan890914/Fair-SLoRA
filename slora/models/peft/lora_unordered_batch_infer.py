@@ -22,8 +22,9 @@ class LoraUnorderedBatchInfer:
         self.max_lora_dim = max(lora_layer_dim)
 
         self.req_bins = torch.zeros(len(adapters), dtype=torch.long, device="cuda")
-
-
+        # self.sub_bins = None
+        # self.add_bins = None
+        # self.sub_bins = torch.zeros(len(adapters), dtype=torch.long, device="cuda")
         # SLoRA does not support None adapter yet for batched inference, so we cannot use this part of the none adapter logic
         self.popular_adapter_id = popular_adapter_id
 
@@ -60,9 +61,16 @@ class LoraUnorderedBatchInfer:
         # print("self.none_adapter_id, self.sub_bins: ", self.none_adapter_id, self.sub_bins)
         self.add_bins = self._get_adapter_bins_for_add_current()
         self.any_active = True
-        # if self.fair_strategy:
-        #     self.any_active = (self.sub_bins != self.none_adapter_id).any().item()
+        if self.fair_strategy:
+            self.any_active = (self.sub_bins != self.none_adapter_id).any().item()
             # print("any active: ", self.any_active)
+
+        self.scale_add = self.infer_adapter.a_scaling
+        self.scale_sub = self.scale_add  # default
+
+        if self.fair_strategy and self.popular_adapter_id is not None:
+            self.scale_sub = self.scale_add.clone()
+            self.scale_sub[self.popular_adapter_id] = -self.scale_sub[self.popular_adapter_id]
 
 
     @torch.no_grad()
@@ -338,26 +346,26 @@ class LoraUnorderedBatchInfer:
             if self.sub_bins is not None and self.any_active: 
                 # print("running double compute")
                 # temp buffer for LoRA_pop output
-                lora_pop_q = torch.zeros_like(q)
+                # lora_pop_q = torch.zeros_like(q)
 
                 # compute delta = x A_pop, then lora_pop_q = delta B_pop
                 # Verify if we are subtracting the right one, we should be subtracting the popular adapaters
                 dispatch_bgmv_fair(delta_qA, x, 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
-                          self.infer_adapter.a_loc, self.sub_bins, 0, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                          self.infer_adapter.a_loc, self.sub_bins, 0, self.scale_sub, self.infer_adapter.none_adapter_id)
                 # Use this to verify affected rows
                 # print("nonzero rows", (delta_qA.abs().sum(dim=1) != 0).nonzero().flatten()[:20])
 
-                dispatch_bgmv_fair(lora_pop_q, delta_qA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                dispatch_bgmv_fair(q, delta_qA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                           self.infer_adapter.a_len, self.infer_adapter.a_loc, 
-                          self.sub_bins, 0, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                          self.sub_bins, 0, self.scale_sub, self.infer_adapter.none_adapter_id)
                 # Use this to verify affected rows
                 # Check if popular rows are actually still zero
                 # print("nonzero rows", (lora_pop_q.abs().sum(dim=1) != 0).nonzero().flatten()[:20])
 
                 # q = x W_pop - LoRA_pop(x) for non-pop rows, untouched for pop rows
-                q.sub_(lora_pop_q)
+                # q.sub_(lora_pop_q)
                 
             # 2. add current adapter LoRA for non-pop rows, skip pop rows
             if self.add_bins is not None and self.any_active: 
@@ -365,10 +373,10 @@ class LoraUnorderedBatchInfer:
                 dispatch_bgmv_fair(delta_qA, x, 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
-                          self.infer_adapter.a_loc, self.add_bins, 0, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                          self.infer_adapter.a_loc, self.add_bins, 0, self.scale_add, self.infer_adapter.none_adapter_id)
                 dispatch_bgmv_fair(q, delta_qA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                             self.infer_adapter.a_len, self.infer_adapter.a_loc, 
-                            self.add_bins, 0, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                            self.add_bins, 0, self.scale_add, self.infer_adapter.none_adapter_id)
                 
         elif not no_lora_compute:
             # mark_start("get_q")
@@ -403,20 +411,20 @@ class LoraUnorderedBatchInfer:
             if self.sub_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
                 # temp buffer for LoRA_pop output
-                lora_pop_k = torch.zeros_like(k_out)
+                # lora_pop_k = torch.zeros_like(k_out)
 
                 # compute delta = x A_pop, then lora_pop_q = delta B_pop
                 # Verify if we are subtracting the right one, we should be subtracting the popular adapaters
                 dispatch_bgmv_fair(delta_kA, x, 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
-                          self.infer_adapter.a_loc, self.sub_bins, 1, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
-                dispatch_bgmv_fair(lora_pop_k, delta_kA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                          self.infer_adapter.a_loc, self.sub_bins, 1, self.scale_sub, self.infer_adapter.none_adapter_id)
+                dispatch_bgmv_fair(k_out, delta_kA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                           self.infer_adapter.a_len, self.infer_adapter.a_loc, 
-                          self.sub_bins, 1, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                          self.sub_bins, 1, self.scale_sub, self.infer_adapter.none_adapter_id)
 
                 # q = x W_pop - LoRA_pop(x) for non-pop rows, untouched for pop rows
-                k_out.sub_(lora_pop_k)
+                # k_out.sub_(lora_pop_k)
                 
             # 2. add current adapter LoRA for non-pop rows, skip pop rows
             if self.add_bins is not None and self.any_active: #  and prob_to_run_double_compute:
@@ -424,10 +432,10 @@ class LoraUnorderedBatchInfer:
                 dispatch_bgmv_fair(delta_kA, x, 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
-                          self.infer_adapter.a_loc, self.add_bins, 1, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                          self.infer_adapter.a_loc, self.add_bins, 1, self.scale_add, self.infer_adapter.none_adapter_id)
                 dispatch_bgmv_fair(k_out, delta_kA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                             self.infer_adapter.a_len, self.infer_adapter.a_loc, 
-                            self.add_bins, 1, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                            self.add_bins, 1, self.scale_add, self.infer_adapter.none_adapter_id)
 
         elif not no_lora_compute:
             # mark_start("get_k")
@@ -462,20 +470,20 @@ class LoraUnorderedBatchInfer:
             if self.sub_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
                 # temp buffer for LoRA_pop output
-                lora_pop_v = torch.zeros_like(v_out)
+                # lora_pop_v = torch.zeros_like(v_out)
 
                 # compute delta = x A_pop, then lora_pop_q = delta B_pop
                 # Verify if we are subtracting the right one, we should be subtracting the popular adapaters
                 dispatch_bgmv_fair(delta_vA, x, 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
-                          self.infer_adapter.a_loc, self.sub_bins, 2, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
-                dispatch_bgmv_fair(lora_pop_v, delta_vA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                          self.infer_adapter.a_loc, self.sub_bins, 2, self.scale_sub, self.infer_adapter.none_adapter_id)
+                dispatch_bgmv_fair(v_out, delta_vA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                           self.infer_adapter.a_len, self.infer_adapter.a_loc, 
-                          self.sub_bins, 2, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                          self.sub_bins, 2, self.scale_sub, self.infer_adapter.none_adapter_id)
 
                 # q = x W_pop - LoRA_pop(x) for non-pop rows, untouched for pop rows
-                v_out.sub_(lora_pop_v)
+                # v_out.sub_(lora_pop_v)
                 
             # 2. add current adapter LoRA for non-pop rows, skip pop rows
             if self.add_bins is not None and self.any_active: # and prob_to_run_double_compute:
@@ -483,10 +491,10 @@ class LoraUnorderedBatchInfer:
                 dispatch_bgmv_fair(delta_vA, x, 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
-                          self.infer_adapter.a_loc, self.add_bins, 2, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                          self.infer_adapter.a_loc, self.add_bins, 2, self.scale_add, self.infer_adapter.none_adapter_id)
                 dispatch_bgmv_fair(v_out, delta_vA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                             self.infer_adapter.a_len, self.infer_adapter.a_loc, 
-                            self.add_bins, 2, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                            self.add_bins, 2, self.scale_add, self.infer_adapter.none_adapter_id)
         elif not no_lora_compute:
             # mark_start("get_v")
             # print("running default slora ")
@@ -630,24 +638,24 @@ class LoraUnorderedBatchInfer:
             # subtract popular LoRA for non-pop rows
             if self.sub_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
-                lora_pop_o = torch.zeros_like(o)
+                # lora_pop_o = torch.zeros_like(o)
                 dispatch_bgmv_fair(delta_oA, x, self.key_buffer[layer_id],
                               self.infer_adapter.a_start, self.infer_adapter.a_len,
-                              self.infer_adapter.a_loc, self.sub_bins, 3, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
-                dispatch_bgmv_fair(lora_pop_o, delta_oA, self.value_buffer[layer_id],
+                              self.infer_adapter.a_loc, self.sub_bins, 3, self.scale_sub, self.infer_adapter.none_adapter_id)
+                dispatch_bgmv_fair(o, delta_oA, self.value_buffer[layer_id],
                               self.infer_adapter.a_start, self.infer_adapter.a_len,
-                              self.infer_adapter.a_loc, self.sub_bins, 3, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
-                o.sub_(lora_pop_o)
+                              self.infer_adapter.a_loc, self.sub_bins, 3, self.scale_sub, self.infer_adapter.none_adapter_id)
+                # o.sub_(lora_pop_o)
 
             # add current adapter LoRA for non-pop rows
             if self.add_bins is not None and self.any_active: # and prob_to_run_double_compute:
                 # print("running double compute")
                 dispatch_bgmv_fair(delta_oA, x, self.key_buffer[layer_id],
                               self.infer_adapter.a_start, self.infer_adapter.a_len,
-                              self.infer_adapter.a_loc, self.add_bins, 3, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                              self.infer_adapter.a_loc, self.add_bins, 3, self.scale_add, self.infer_adapter.none_adapter_id)
                 dispatch_bgmv_fair(o, delta_oA, self.value_buffer[layer_id],
                               self.infer_adapter.a_start, self.infer_adapter.a_len,
-                              self.infer_adapter.a_loc, self.add_bins, 3, self.infer_adapter.a_scaling, self.infer_adapter.none_adapter_id)
+                              self.infer_adapter.a_loc, self.add_bins, 3, self.scale_add, self.infer_adapter.none_adapter_id)
         elif not no_lora_compute:
             # mark_start("get_o")
             # print("running default slora ")
