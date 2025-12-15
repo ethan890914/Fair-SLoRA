@@ -133,7 +133,7 @@ class ModelRpcServer(rpyc.Service):
         else:
             print("infer adapter")
             self.infer_adapter = InferAdapter.init(self.model.mem_manager,
-                                                   prefetch_stream)
+                                                   prefetch_stream, self.fair_strategy)
         ''' finish init adapters '''
         
         set_random_seed(2147483647)

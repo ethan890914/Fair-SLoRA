@@ -25,10 +25,11 @@ class InferAdapter:
 
     # Add none_adapter slot
     none_adapter_id: int = -1
+    fair_strategy: bool = False
 
 
     @classmethod
-    def init(cls, mem_manager, prefetch_stream):
+    def init(cls, mem_manager, prefetch_stream, fair_strategy):
         obj = cls(
                 adapter_dirs=[],
                 a_loc=torch.empty(0, dtype=torch.long, device="cuda"),
@@ -40,8 +41,10 @@ class InferAdapter:
                 prefetch_tag={},
                 cur_tag=0,
                 prefetch_stream=prefetch_stream,
+                fair_strategy=fair_strategy
             )
         obj.ensure_none_slot()
+        # self.fair_strategy = fair_strategy
         return obj
         # return cls(
         #     adapter_dirs=[],
@@ -144,7 +147,8 @@ class InferAdapter:
     def load_adapters(self, adapters, prefetch=False):
 
         # Temporarily remove none adapter slot to load adapters
-        self._pop_none_slot()
+        if self.fair_strategy:
+            self._pop_none_slot()
         try:
             # func_name = "realload" if not prefetch else "prefetch"
             # mark_start(func_name)
@@ -238,12 +242,14 @@ class InferAdapter:
             # print(self.mem_manager.can_use_mem_size_suffix // 4 / 32)
         finally:
             # Push back adapter slot
-            self._push_none_slot()
+            if self.fair_strategy:
+                self._push_none_slot()
 
     # @calculate_time(show=True, min_cost_ms=0)
     def offload_adapters(self, reserve_adapter_dirs):
-        # Temporarily remove none adapter slot to offload adapters
-        self._pop_none_slot()
+        # Temporarily remove none adapter slot to offload adapters if we're using fair strategy
+        if self.fair_strategy:
+            self._pop_none_slot()
         try:
             if len(reserve_adapter_dirs) == len(self.adapter_dirs):
                 print(f"offload 0 adapters, {len(self.adapter_dirs)} remains")
@@ -317,8 +323,9 @@ class InferAdapter:
 
             # 
         finally:
-            # Always restore the none slot
-            self._push_none_slot()
+            if self.fair_strategy:
+                # Always restore the none slot
+                self._push_none_slot()
 
 
 import triton
