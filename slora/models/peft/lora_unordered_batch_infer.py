@@ -30,7 +30,8 @@ class LoraUnorderedBatchInfer:
         # Use non_adapter id from infer adapter
         # self.none_adapter_id = none_adapter_id
         self.none_adapter_id = infer_adapter.none_adapter_id
-        # print("none_adapter_id", self.none_adapter_id, "a_len size", infer_adapter.a_len.numel())
+        # self.none_adapter_id = none_adapter_id
+        # print("infer_adapter none_adapter_id", self.none_adapter_id, "passed in none_adapter_id: ", none_adapter_id)
 
         self.fair_strategy = fair_strategy and (popular_adapter_id is not None)
         self.num_adapters = len(adapters)
@@ -56,10 +57,11 @@ class LoraUnorderedBatchInfer:
 
         # Precalculate sub and add bins only once
         self.sub_bins = self._get_adapter_bins_for_sub_popular()
+        # print("self.none_adapter_id, self.sub_bins: ", self.none_adapter_id, self.sub_bins)
         self.add_bins = self._get_adapter_bins_for_add_current()
         self.any_active = True
-        if self.fair_strategy:
-            self.any_active = (self.sub_bins != self.none_adapter_id).any().item()
+        # if self.fair_strategy:
+        #     self.any_active = (self.sub_bins != self.none_adapter_id).any().item()
             # print("any active: ", self.any_active)
 
 

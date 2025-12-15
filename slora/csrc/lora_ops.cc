@@ -52,12 +52,12 @@ inline bool launch_bgmv_kernel(T* Y, const T* X, const T* W,
                                uint64_t qkvo,
                                uint16_t in_features, uint16_t out_features,
                                int64_t batch_size,
-                               const T* lora_scales) {
+                               const T* lora_scales, int64_t none_id) {
   switch (pack_u16(in_features, out_features)) {
 #define CASE_ONESIDE(_T, feat_in, feat_out)                           \
   case pack_u16(feat_in, feat_out):                                   \
     bgmv_kernel<feat_in, feat_out>(Y, X, W, start_indicies, lora_ranks, loc_indicies, indicies, \
-                                   qkvo, batch_size, lora_scales);     \
+                                   qkvo, batch_size, lora_scales, none_id);     \
     break;
 #define CASE(_T, narrow, wide)  \
   CASE_ONESIDE(T, narrow, wide) \
@@ -89,6 +89,8 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Ten
   CHECK_DIM(3, w); // [size, head_dim, head_size]
   CHECK_DIM(1, indicies);
 
+  int64_t none_id = -1;  // never matches any adapter id
+
   int64_t B = x.size(0);
   int64_t h_in = x.size(1);
   int64_t h_out = y.size(1);
@@ -105,7 +107,7 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Ten
                                 lora_ranks.data_ptr<int64_t>(),
                                 loc_indicies.data_ptr<int64_t>(),
                                 indicies.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
-                                static_cast<nv_half*>(lora_scales.data_ptr()));
+                                static_cast<nv_half*>(lora_scales.data_ptr()), none_id);
         break;
       case at::ScalarType::BFloat16:
         ok = launch_bgmv_kernel(static_cast<nv_bfloat16*>(y.data_ptr()),
@@ -115,7 +117,7 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Ten
                                 lora_ranks.data_ptr<int64_t>(),
                                 loc_indicies.data_ptr<int64_t>(),
                                 indicies.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
-                                static_cast<nv_bfloat16*>(lora_scales.data_ptr()));
+                                static_cast<nv_bfloat16*>(lora_scales.data_ptr()), none_id);
         break;
       default:
         break;
@@ -141,76 +143,125 @@ void dispatch_bgmv_fair(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch
   CHECK_DIM(3, w); // [size, head_dim, head_size]
   CHECK_DIM(1, indicies);
 
+  // int64_t none_id = -1;  // never matches any adapter id
+
+  int64_t B = x.size(0);
+  int64_t h_in = x.size(1);
+  int64_t h_out = y.size(1);
   CHECK_EQ(indicies.size(0), x.size(0));
   CHECK_EQ(y.size(0), x.size(0));
-
-  // Create mask of which rows need to launch kernel
-  // Pass in none_id for faster time
-  at::Tensor none_mask = indicies.eq(none_id);
-
-  // Mixed case: now pay for nonzero + subset
-  at::Tensor active_idx = at::nonzero(~none_mask).view(-1);
-  // parse new x y
-  auto x_active = x.index_select(0, active_idx).contiguous();
-  auto y_active = y.index_select(0, active_idx).contiguous();
-  auto indicies_active = indicies.index_select(0, active_idx).contiguous();
-
-  TORCH_CHECK(y_active.size(0) == active_idx.numel(), "y_active rows mismatch");
-  TORCH_CHECK(y_active.size(1) == y.size(1), "y_active cols mismatch");
-
-  // Debug prints to ensure actual reduction
-  // Original tensors
-  // printf("ORIGINAL x: B=%ld, H_in=%ld\n", x.size(0), x.size(1));
-  // printf("ORIGINAL y: B=%ld, H_out=%ld\n", y.size(0), y.size(1));
-  // printf("ORIGINAL indicies: B=%ld\n", indicies.size(0));
-
-  // // Active rows
-  // printf("ACTIVE rows = %ld\n", active_idx.numel());
-
-  // // Sub tensors
-  // printf("SUB x: B_sub=%ld, H_in=%ld\n", x_active.size(0), x_active.size(1));
-  // printf("SUB y: B_sub=%ld, H_out=%ld\n", y_active.size(0), y_active.size(1));
-  // printf("SUB indicies: B_sub=%ld\n", indicies_active.size(0));
-
-  // Similar to original dispatch function, only swapped to new x_active, y_active, and indicies_active
-  int64_t B = x_active.size(0);
-  int64_t h_in = x_active.size(1);
-  int64_t h_out = y_active.size(1);
-  
   bool ok = false;
   if (h_in < 65536 && h_out < 65536) {
-    switch (x_active.scalar_type()) {
+    switch (x.scalar_type()) {
       case at::ScalarType::Half:
-        ok = launch_bgmv_kernel(static_cast<nv_half*>(y_active.data_ptr()),
-                                static_cast<nv_half*>(x_active.data_ptr()),
+        ok = launch_bgmv_kernel(static_cast<nv_half*>(y.data_ptr()),
+                                static_cast<nv_half*>(x.data_ptr()),
                                 static_cast<nv_half*>(w.data_ptr()),
                                 start_indicies.data_ptr<int64_t>(),
                                 lora_ranks.data_ptr<int64_t>(),
                                 loc_indicies.data_ptr<int64_t>(),
-                                indicies_active.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
-                                static_cast<nv_half*>(lora_scales.data_ptr()));
+                                indicies.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
+                                static_cast<nv_half*>(lora_scales.data_ptr()), none_id);
         break;
       case at::ScalarType::BFloat16:
-        ok = launch_bgmv_kernel(static_cast<nv_bfloat16*>(y_active.data_ptr()),
-                                static_cast<nv_bfloat16*>(x_active.data_ptr()),
+        ok = launch_bgmv_kernel(static_cast<nv_bfloat16*>(y.data_ptr()),
+                                static_cast<nv_bfloat16*>(x.data_ptr()),
                                 static_cast<nv_bfloat16*>(w.data_ptr()),
                                 start_indicies.data_ptr<int64_t>(),
                                 lora_ranks.data_ptr<int64_t>(),
                                 loc_indicies.data_ptr<int64_t>(),
-                                indicies_active.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
-                                static_cast<nv_bfloat16*>(lora_scales.data_ptr()));
+                                indicies.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
+                                static_cast<nv_bfloat16*>(lora_scales.data_ptr()), none_id);
         break;
       default:
         break;
     }
   }
   TORCH_CHECK(ok, "No suitable kernel.", " h_in=", h_in, " h_out=", h_out,
-              " dtype=", x_active.scalar_type());
+              " dtype=", x.scalar_type());
+  // CHECK_INPUT(y);
+  // CHECK_INPUT(x);
+  // CHECK_INPUT(w);
+  // CHECK_INPUT(start_indicies);
+  // CHECK_INPUT(lora_ranks);
+  // CHECK_INPUT(loc_indicies);
+  // CHECK_INPUT(indicies);
 
-  // Write the updated y_active back into the original y at active_idx
-  y.index_copy_(0, active_idx, y_active);
+  // CHECK_DIM(2, y);
+  // CHECK_DIM(2, x);
+  // CHECK_DIM(3, w); // [size, head_dim, head_size]
+  // CHECK_DIM(1, indicies);
 
-  return;
+  // CHECK_EQ(indicies.size(0), x.size(0));
+  // CHECK_EQ(y.size(0), x.size(0));
+
+  // // Create mask of which rows need to launch kernel
+  // // Pass in none_id for faster time
+  // at::Tensor none_mask = indicies.eq(none_id);
+
+  // // Mixed case: now pay for nonzero + subset
+  // at::Tensor active_idx = at::nonzero(~none_mask).view(-1);
+  // // parse new x y
+  // auto x_active = x.index_select(0, active_idx).contiguous();
+  // auto y_active = y.index_select(0, active_idx).contiguous();
+  // auto indicies_active = indicies.index_select(0, active_idx).contiguous();
+
+  // // TORCH_CHECK(y_active.size(0) == active_idx.numel(), "y_active rows mismatch");
+  // // TORCH_CHECK(y_active.size(1) == y.size(1), "y_active cols mismatch");
+
+  // // Debug prints to ensure actual reduction
+  // // Original tensors
+  // // printf("ORIGINAL x: B=%ld, H_in=%ld\n", x.size(0), x.size(1));
+  // // printf("ORIGINAL y: B=%ld, H_out=%ld\n", y.size(0), y.size(1));
+  // // printf("ORIGINAL indicies: B=%ld\n", indicies.size(0));
+
+  // // // Active rows
+  // // printf("ACTIVE rows = %ld\n", active_idx.numel());
+
+  // // // Sub tensors
+  // // printf("SUB x: B_sub=%ld, H_in=%ld\n", x_active.size(0), x_active.size(1));
+  // // printf("SUB y: B_sub=%ld, H_out=%ld\n", y_active.size(0), y_active.size(1));
+  // // printf("SUB indicies: B_sub=%ld\n", indicies_active.size(0));
+
+  // // Similar to original dispatch function, only swapped to new x_active, y_active, and indicies_active
+  // int64_t B = x_active.size(0);
+  // int64_t h_in = x_active.size(1);
+  // int64_t h_out = y_active.size(1);
+  
+  // bool ok = false;
+  // if (h_in < 65536 && h_out < 65536) {
+  //   switch (x_active.scalar_type()) {
+  //     case at::ScalarType::Half:
+  //       ok = launch_bgmv_kernel(static_cast<nv_half*>(y_active.data_ptr()),
+  //                               static_cast<nv_half*>(x_active.data_ptr()),
+  //                               static_cast<nv_half*>(w.data_ptr()),
+  //                               start_indicies.data_ptr<int64_t>(),
+  //                               lora_ranks.data_ptr<int64_t>(),
+  //                               loc_indicies.data_ptr<int64_t>(),
+  //                               indicies_active.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
+  //                               static_cast<nv_half*>(lora_scales.data_ptr()));
+  //       break;
+  //     case at::ScalarType::BFloat16:
+  //       ok = launch_bgmv_kernel(static_cast<nv_bfloat16*>(y_active.data_ptr()),
+  //                               static_cast<nv_bfloat16*>(x_active.data_ptr()),
+  //                               static_cast<nv_bfloat16*>(w.data_ptr()),
+  //                               start_indicies.data_ptr<int64_t>(),
+  //                               lora_ranks.data_ptr<int64_t>(),
+  //                               loc_indicies.data_ptr<int64_t>(),
+  //                               indicies_active.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
+  //                               static_cast<nv_bfloat16*>(lora_scales.data_ptr()));
+  //       break;
+  //     default:
+  //       break;
+  //   }
+  // }
+  // TORCH_CHECK(ok, "No suitable kernel.", " h_in=", h_in, " h_out=", h_out,
+  //             " dtype=", x_active.scalar_type());
+
+  // // Write the updated y_active back into the original y at active_idx
+  // y.index_copy_(0, active_idx, y_active);
+
+  // return;
   // }
 
 
