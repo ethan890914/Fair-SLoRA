@@ -165,7 +165,7 @@ class ModelRpcServer(rpyc.Service):
 
         # base_model weights for each transformer layer
         base_layers_weight = self.model.trans_layers_weight
-        # device = base_weight_param.device
+
         def merge_proj(base_weight_param, A, B, scaling, name):
             if A is None or B is None:
                 return
@@ -175,9 +175,8 @@ class ModelRpcServer(rpyc.Service):
             A_dev = A.to(device=device, dtype=torch.float32)
             B_dev = B.to(device=device, dtype=torch.float32)
 
-            delta = A_dev @ B_dev  # (in_dim, out_dim)
+            delta = A_dev @ B_dev  
             delta = (scaling * delta).to(dtype=base_weight_param.dtype)
-            # print("DELTAAA", delta.min(), delta.max(), delta)
             with torch.no_grad():
                 base_weight_param.add_(delta)
 
@@ -185,6 +184,8 @@ class ModelRpcServer(rpyc.Service):
             # print(f"Merging layer: {layer_id}")
             lora_layer = pop_adapter.layers[layer_id]
 
+            # There are two types of possible LoRA weights, q_lora_A and q_lora_A_home, on different devices
+            # Original S-LoRA uses q_lora_A_home, which keeps adapters on CPU, so we need to move
             # q
             if lora_layer.q_lora_A is not None and lora_layer.q_lora_B is not None:
                 # print("---Merging Q LORA")
@@ -193,8 +194,6 @@ class ModelRpcServer(rpyc.Service):
             elif lora_layer.q_lora_A_home is not None and lora_layer.q_lora_B_home is not None:
                 # print("---Merging Q LORA home")
                 merge_proj(layer_weight.q_weight_, lora_layer.q_lora_A_home, lora_layer.q_lora_B_home, scaling, "q")
-                # delta_q = lora_layer.q_lora_A_home @ lora_layer.q_lora_B_home  # (H, H)
-                # layer_weight.q_weight_ += scaling * delta_q
 
             # k
             if lora_layer.k_lora_A is not None and lora_layer.k_lora_B is not None:
@@ -205,9 +204,6 @@ class ModelRpcServer(rpyc.Service):
                 # print("---Merging K LORA home")
                 merge_proj(layer_weight.k_weight_, lora_layer.k_lora_A_home, lora_layer.k_lora_B_home, scaling, "k")
 
-                # delta_k = lora_layer.k_lora_A_home @ lora_layer.k_lora_B_home
-                # layer_weight.k_weight_ += scaling * delta_k
-
             # v
             if lora_layer.v_lora_A is not None and lora_layer.v_lora_B is not None:
                 # print("---Merging V LORA")
@@ -216,8 +212,6 @@ class ModelRpcServer(rpyc.Service):
             elif lora_layer.v_lora_A_home is not None and lora_layer.v_lora_B_home is not None:
                 # print("---Merging V LORA home")
                 merge_proj(layer_weight.v_weight_, lora_layer.v_lora_A_home, lora_layer.v_lora_B_home, scaling, "v")
-                # delta_v = lora_layer.v_lora_A_home @ lora_layer.v_lora_B_home
-                # layer_weight.v_weight_ += scaling * delta_v
 
             # o
             if lora_layer.o_lora_A is not None and lora_layer.o_lora_B is not None:
@@ -227,8 +221,7 @@ class ModelRpcServer(rpyc.Service):
             elif lora_layer.o_lora_A_home is not None and lora_layer.o_lora_B_home is not None:
                 # print("---Merging O LORA home")
                 merge_proj(layer_weight.o_weight_, lora_layer.o_lora_A_home, lora_layer.o_lora_B_home, scaling, "o")
-                # delta_o = lora_layer.o_lora_A_home @ lora_layer.o_lora_B_home
-                # layer_weight.o_weight_ += scaling * delta_o
+                
 
     @torch.no_grad()
     def exposed_load_adapters(self, adapter_dirs, prefetch=False):
