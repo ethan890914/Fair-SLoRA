@@ -33,13 +33,22 @@ BenchmarkConfig = namedtuple(
 
 fair_suite = {
     "default": BenchmarkConfig(
-        num_adapters = [1, 10, 50, 100],
-        alpha = [0.1, 0.25, 0.5, 0.75, 1],
-        req_rate = [2.5],
+        num_adapters = [10, 50, 100],
+        alpha = [0.1, 0.2, 0.5, 1],
+        req_rate = [2],
         cv = [1],
-        duration = [60],
+        duration = [60 * 5],
         input_range = [[8, 512]],
         output_range = [[8, 512]],
+    ),
+    "single": BenchmarkConfig(
+        num_adapters=[1],
+        alpha=[1],
+        req_rate=[2],
+        cv=[1],
+        duration=[60 * 5],
+        input_range=[[8, 512]],
+        output_range=[[8, 512]],
     )
 }
 paper_suite = {
