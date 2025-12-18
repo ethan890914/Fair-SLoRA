@@ -54,9 +54,17 @@ cd benchmarks
 python launch_server.py --fair_strategy --num-adapter 100 --num-token 10000 --model-setting Real
 python run_exp.py --fair --model-setting Real
 ```
+For Popular Adapter Algorithm, the window size and threshold is 10 and 5 respectively. To test different size of window and threshold for Popular Adapter Algorithm, navigate to [this file](slora/server/router/model_infer/model_rpc.py) and modify `self.window_len` and `self.popular_threshold` in line 54 and 57.
 
+## Evaluation
+To draw a comparison graph for different setting, replace the output file name in [`draw_fig.py`](exp_res/draw_fig.py), and run
+
+```bash
+python draw_fig.py
+```
+to see the visualization comparison of throughput.
 ## Acknowledgment
-Fair SLoRA is build on top of [S-LoRA](https://github.com/S-LoRA/S-LoRA).
+Fair SLoRA is build on top of [S-LoRA](https://github.com/S-LoRA/S-LoRA). All the experiments are executed on NYU Burst cluster with single A100 GPU.
 
 
 
